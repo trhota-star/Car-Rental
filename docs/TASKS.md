@@ -57,7 +57,7 @@ Bugs: add a row `BUG-n` under the owning agent's section, then SendMessage the o
 ### app
 | ID | Task | Status | Notes |
 | --- | --- | --- | --- |
-| APP-1 | Design system, layout, navigation, responsive shell, loading/empty/error states | todo | |
+| APP-1 | Design system, layout, navigation, responsive shell, loading/empty/error states | doing | |
 | APP-2 | Auth: register, login, logout, session, role guards (Better Auth) | todo | needs DB-1 |
 | APP-3 | Home + search + filters + results | todo | needs DB-3 |
 | APP-4 | Vehicle details + availability calendar + branch/date selection | todo | needs DB-3 |
@@ -70,10 +70,10 @@ Bugs: add a row `BUG-n` under the owning agent's section, then SendMessage the o
 ### qa
 | ID | Task | Status | Notes |
 | --- | --- | --- | --- |
-| QA-1 | Test harness: clean test DB per run, migrations on clean DB, factories | todo | |
+| QA-1 | Test harness: clean test DB per run, migrations on clean DB, factories | done | `tests/helpers/{env,db,factories,http}.ts`; vitest projects unit + integration (serial, fresh schema + all migrations per run); e2e on own `next start :3100` vs test DB, desktop-chrome + Pixel 7 + iPhone 15. DB race tests 9/9 pass. |
 | QA-2 | Auth + authorization tests (incl. cross-user access to reservations, vouchers, licences) | todo | |
 | QA-3 | Search, filters, date ranges, availability calendar tests | todo | |
-| QA-4 | Concurrency: two sessions reserve overlapping dates at once → exactly one succeeds; back-to-back allowed | todo | |
+| QA-4 | Concurrency: two sessions reserve overlapping dates at once → exactly one succeeds; back-to-back allowed | doing | DB-level races pass (25x reservation vs reservation, 25x vs maintenance, back-to-back). Service-level pending DB-5. |
 | QA-5 | Pricing tests: daily rates, extras, one-way, VAT, late return, deposit | todo | |
 | QA-6 | Payments: success, failure, cancel, retry, refund, deposit release, duplicate webhooks | todo | |
 | QA-7 | Expired holds release (idempotent, repeated runs) | todo | |
