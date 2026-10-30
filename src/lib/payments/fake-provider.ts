@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { MemoryFakeProviderStore, type FakeObject, type FakeProviderStore } from "./fake-store";
 import {
   PaymentError,
   type ChargeInput,
@@ -39,6 +40,11 @@ export interface FakePaymentProviderOptions {
   /** Send every webhook twice, like real providers sometimes do. */
   duplicateWebhooks?: boolean;
   now?: () => Date;
+  /**
+   * Where payments, holds, idempotency keys and events live. Default: in memory (unit tests, scripts).
+   * The app uses PgFakeProviderStore so state survives server restarts.
+   */
+  store?: FakeProviderStore;
 }
 
 export function signFakeWebhook(rawBody: string, secret: string, timestamp: number): string {
@@ -61,27 +67,30 @@ export function httpWebhookDeliver(url: string): WebhookDeliver {
   };
 }
 
+const REJECTED_METHOD = "invalid_payment_method";
+
 export class FakePaymentProvider implements PaymentProvider {
   readonly name = "fake";
   readonly signatureHeader = FAKE_SIGNATURE_HEADER;
-  private payments = new Map<string, Payment>();
-  private holds = new Map<string, DepositHold>();
-  private idempotency = new Map<string, Payment | DepositHold>();
+  private readonly store: FakeProviderStore;
+  /** Events emitted by THIS instance (sync view for tests); the store keeps all of them. */
   private events: PaymentEvent[] = [];
   private now: () => Date;
 
   constructor(private readonly options: FakePaymentProviderOptions) {
     if (!options.webhookSecret) throw new Error("FakePaymentProvider needs a webhookSecret");
     this.now = options.now ?? (() => new Date());
+    this.store = options.store ?? new MemoryFakeProviderStore();
   }
 
   async createPayment(input: ChargeInput): Promise<Payment> {
     validateAmount(input.amount);
-    const cached = this.fromIdempotency<Payment>("pay", input.idempotencyKey);
-    if (cached) return cached;
+    const id = `pay_fake_${randomUUID()}`;
+    const owner = input.idempotencyKey ? await this.store.claimIdempotency(`pay:${input.idempotencyKey}`, id) : id;
+    if (owner !== id) return strip<Payment>(await this.waitFor(owner));
 
     const payment: Payment = {
-      id: `pay_fake_${randomUUID()}`,
+      id,
       amount: input.amount,
       currency: input.currency.toLowerCase(),
       status: "succeeded",
@@ -103,47 +112,51 @@ export class FakePaymentProvider implements PaymentProvider {
         payment.status = "pending";
         break;
       default:
-        throw new PaymentError(`Unknown fake payment method "${input.paymentMethod}"`, "invalid_payment_method");
+        // Keep the key bound to a rejected attempt so a retry with the same key fails the same way.
+        await this.store.insert({ ...payment, status: "failed", failureReason: REJECTED_METHOD, kind: "payment" });
+        throw new PaymentError(`Unknown fake payment method "${input.paymentMethod}"`, REJECTED_METHOD);
     }
-    this.payments.set(payment.id, payment);
-    this.remember("pay", input.idempotencyKey, payment);
+    await this.store.insert({ ...payment, kind: "payment" });
     await this.emit(`payment.${payment.status}` as PaymentEventType, payment);
     return { ...payment };
   }
 
   async cancelPayment(paymentId: string): Promise<Payment> {
-    const payment = this.getPayment(paymentId);
-    if (payment.status === "canceled") return { ...payment };
-    if (payment.status !== "pending") {
-      throw new PaymentError(`Cannot cancel a ${payment.status} payment; refund it instead`, "invalid_state");
-    }
-    payment.status = "canceled";
-    await this.emit("payment.canceled", payment);
-    return { ...payment };
+    const r = await this.mutatePayment(paymentId, (p) => {
+      if (p.status === "canceled") return p;
+      if (p.status !== "pending") {
+        throw new PaymentError(`Cannot cancel a ${p.status} payment; refund it instead`, "invalid_state");
+      }
+      return { ...p, status: "canceled" };
+    });
+    if (r.before.status !== r.after.status) await this.emit("payment.canceled", r.after);
+    return r.after;
   }
 
   async refundPayment(paymentId: string, amount?: number): Promise<Payment> {
-    const payment = this.getPayment(paymentId);
-    if (payment.status !== "succeeded" && payment.status !== "partially_refunded") {
-      throw new PaymentError(`Cannot refund a ${payment.status} payment`, "invalid_state");
-    }
-    const remaining = payment.amount - payment.refundedAmount;
-    const refund = amount ?? remaining;
-    validateAmount(refund);
-    if (refund > remaining) throw new PaymentError("Refund exceeds remaining amount", "amount_too_large");
-    payment.refundedAmount += refund;
-    payment.status = payment.refundedAmount === payment.amount ? "refunded" : "partially_refunded";
-    await this.emit("payment.refunded", payment);
-    return { ...payment };
+    const r = await this.mutatePayment(paymentId, (p) => {
+      if (p.status !== "succeeded" && p.status !== "partially_refunded") {
+        throw new PaymentError(`Cannot refund a ${p.status} payment`, "invalid_state");
+      }
+      const remaining = p.amount - p.refundedAmount;
+      const refund = amount ?? remaining;
+      validateAmount(refund);
+      if (refund > remaining) throw new PaymentError("Refund exceeds remaining amount", "amount_too_large");
+      const refundedAmount = p.refundedAmount + refund;
+      return { ...p, refundedAmount, status: refundedAmount === p.amount ? "refunded" : "partially_refunded" };
+    });
+    await this.emit("payment.refunded", r.after);
+    return r.after;
   }
 
   async holdDeposit(input: ChargeInput): Promise<DepositHold> {
     validateAmount(input.amount);
-    const cached = this.fromIdempotency<DepositHold>("hold", input.idempotencyKey);
-    if (cached) return cached;
+    const id = `hold_fake_${randomUUID()}`;
+    const owner = input.idempotencyKey ? await this.store.claimIdempotency(`hold:${input.idempotencyKey}`, id) : id;
+    if (owner !== id) return strip<DepositHold>(await this.waitFor(owner));
 
     const hold: DepositHold = {
-      id: `hold_fake_${randomUUID()}`,
+      id,
       amount: input.amount,
       currency: input.currency.toLowerCase(),
       status: "held",
@@ -155,33 +168,34 @@ export class FakePaymentProvider implements PaymentProvider {
       hold.status = "failed";
       hold.failureReason = "card_declined";
     } else if (input.paymentMethod !== FAKE_PAYMENT_METHODS.success) {
-      throw new PaymentError(`Unsupported payment method for deposits "${input.paymentMethod}"`, "invalid_payment_method");
+      await this.store.insert({ ...hold, status: "failed", failureReason: REJECTED_METHOD, kind: "hold" });
+      throw new PaymentError(`Unsupported payment method for deposits "${input.paymentMethod}"`, REJECTED_METHOD);
     }
-    this.holds.set(hold.id, hold);
-    this.remember("hold", input.idempotencyKey, hold);
+    await this.store.insert({ ...hold, kind: "hold" });
     await this.emit(hold.status === "held" ? "deposit.held" : "deposit.failed", hold);
     return { ...hold };
   }
 
   async releaseDeposit(holdId: string): Promise<DepositHold> {
-    const hold = this.getHold(holdId);
-    if (hold.status === "released") return { ...hold };
-    if (hold.status !== "held") throw new PaymentError(`Cannot release a ${hold.status} deposit`, "invalid_state");
-    hold.status = "released";
-    await this.emit("deposit.released", hold);
-    return { ...hold };
+    const r = await this.mutateHold(holdId, (h) => {
+      if (h.status === "released") return h;
+      if (h.status !== "held") throw new PaymentError(`Cannot release a ${h.status} deposit`, "invalid_state");
+      return { ...h, status: "released" };
+    });
+    if (r.before.status !== r.after.status) await this.emit("deposit.released", r.after);
+    return r.after;
   }
 
   async captureDeposit(holdId: string, amount?: number): Promise<DepositHold> {
-    const hold = this.getHold(holdId);
-    if (hold.status !== "held") throw new PaymentError(`Cannot capture a ${hold.status} deposit`, "invalid_state");
-    const capture = amount ?? hold.amount;
-    validateAmount(capture);
-    if (capture > hold.amount) throw new PaymentError("Capture exceeds held amount", "amount_too_large");
-    hold.capturedAmount = capture;
-    hold.status = "captured";
-    await this.emit("deposit.captured", hold);
-    return { ...hold };
+    const r = await this.mutateHold(holdId, (h) => {
+      if (h.status !== "held") throw new PaymentError(`Cannot capture a ${h.status} deposit`, "invalid_state");
+      const capture = amount ?? h.amount;
+      validateAmount(capture);
+      if (capture > h.amount) throw new PaymentError("Capture exceeds held amount", "amount_too_large");
+      return { ...h, capturedAmount: capture, status: "captured" };
+    });
+    await this.emit("deposit.captured", r.after);
+    return r.after;
   }
 
   verifyWebhook(rawBody: string, signatureHeader: string | null): PaymentEvent {
@@ -205,14 +219,19 @@ export class FakePaymentProvider implements PaymentProvider {
 
   // --- Test helpers (not part of PaymentProvider) ---
 
-  /** Every event emitted so far, oldest first. */
+  /** Events emitted by this provider instance, oldest first. */
   listEvents(): PaymentEvent[] {
     return [...this.events];
   }
 
+  /** Every event in the store (shared by all instances / processes using it), oldest first. */
+  listStoredEvents(): Promise<PaymentEvent[]> {
+    return this.store.listEvents();
+  }
+
   /** Deliver an already-sent event again, simulating a provider retry. */
   async resendEvent(eventId: string): Promise<void> {
-    const event = this.events.find((e) => e.id === eventId);
+    const event = this.events.find((e) => e.id === eventId) ?? (await this.store.getEvent(eventId));
     if (!event) throw new PaymentError(`No such event ${eventId}`, "not_found");
     await this.deliver(event);
   }
@@ -225,6 +244,7 @@ export class FakePaymentProvider implements PaymentProvider {
       data: { ...data },
     };
     this.events.push(event);
+    await this.store.appendEvent(event);
     await this.deliver(event);
     if (this.options.duplicateWebhooks) await this.deliver(event);
   }
@@ -236,27 +256,45 @@ export class FakePaymentProvider implements PaymentProvider {
     await this.options.deliver(rawBody, signFakeWebhook(rawBody, this.options.webhookSecret, timestamp), event);
   }
 
-  private getPayment(id: string): Payment {
-    const payment = this.payments.get(id);
-    if (!payment) throw new PaymentError(`No such payment ${id}`, "not_found");
-    return payment;
+  /** The object owning an idempotency key may still be being written by a concurrent call. */
+  private async waitFor(id: string): Promise<FakeObject> {
+    for (let i = 0; i < 100; i++) {
+      const o = await this.store.get(id);
+      if (o) {
+        if (o.failureReason === REJECTED_METHOD) {
+          throw new PaymentError("Payment method was rejected for this idempotency key", REJECTED_METHOD);
+        }
+        return o;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new PaymentError(`Idempotent request ${id} is still in progress`, "conflict");
   }
 
-  private getHold(id: string): DepositHold {
-    const hold = this.holds.get(id);
-    if (!hold) throw new PaymentError(`No such deposit hold ${id}`, "not_found");
-    return hold;
+  private async mutatePayment(id: string, fn: (p: Payment) => Payment) {
+    const r = await this.store.mutate(id, (o) => {
+      if (o.kind !== "payment") throw new PaymentError(`No such payment ${id}`, "not_found");
+      return { ...fn(strip<Payment>(o)), kind: "payment" };
+    });
+    if (!r) throw new PaymentError(`No such payment ${id}`, "not_found");
+    return { before: strip<Payment>(r.before), after: strip<Payment>(r.after) };
   }
 
-  private fromIdempotency<T extends Payment | DepositHold>(kind: string, key?: string): T | undefined {
-    if (!key) return undefined;
-    const hit = this.idempotency.get(`${kind}:${key}`);
-    return hit ? ({ ...hit } as T) : undefined;
+  private async mutateHold(id: string, fn: (h: DepositHold) => DepositHold) {
+    const r = await this.store.mutate(id, (o) => {
+      if (o.kind !== "hold") throw new PaymentError(`No such deposit hold ${id}`, "not_found");
+      return { ...fn(strip<DepositHold>(o)), kind: "hold" };
+    });
+    if (!r) throw new PaymentError(`No such deposit hold ${id}`, "not_found");
+    return { before: strip<DepositHold>(r.before), after: strip<DepositHold>(r.after) };
   }
+}
 
-  private remember(kind: string, key: string | undefined, value: Payment | DepositHold) {
-    if (key) this.idempotency.set(`${kind}:${key}`, value);
-  }
+/** Drop the store's `kind` tag. */
+function strip<T extends Payment | DepositHold>(o: FakeObject): T {
+  const copy: Record<string, unknown> = { ...o };
+  delete copy.kind;
+  return copy as unknown as T;
 }
 
 function validateAmount(amount: number) {

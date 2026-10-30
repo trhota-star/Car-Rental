@@ -3,7 +3,7 @@ import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   getPaymentProvider,
-  PaymentError,
+  isPaymentError,
   type DepositHold,
   type Payment as ProviderPayment,
   type PaymentEvent,
@@ -91,7 +91,7 @@ function mapDepositStatus(h: DepositHold): Deposit["status"] {
 }
 
 function providerFailure(err: unknown): never {
-  if (err instanceof PaymentError) {
+  if (isPaymentError(err)) {
     if (err.code === "invalid_payment_method" || err.code === "invalid_amount") {
       throw new ServiceError("VALIDATION_ERROR", err.message, { providerCode: err.code });
     }
@@ -316,7 +316,8 @@ export async function handlePaymentWebhook(
   try {
     event = provider.verifyWebhook(rawBody, signatureHeader);
   } catch (err) {
-    if (err instanceof PaymentError) throw new ServiceError("INVALID_SIGNATURE", err.message);
+    // Any verification failure is a client error (400), whatever its exact provider code.
+    if (isPaymentError(err)) throw new ServiceError("INVALID_SIGNATURE", err.message);
     throw err;
   }
   return applyPaymentEvent(event, { ...opts, provider });
@@ -566,7 +567,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
     for (const p of paid) {
       if (owed <= 0) break;
       const room = p.amountFils - p.refundedFils;
-      if (room <= 0 || !p.providerPaymentId) continue;
+      if (room <= 0 || !p.providerPaymentId || p.needsAttentionAt) continue;
       const amount = Math.min(room, owed);
       try {
         const res = p.provider === SEED_PROVIDER ? simulatedRefund(p, amount) : await provider.refundPayment(p.providerPaymentId, amount);
@@ -575,26 +576,30 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
         out.refundedFils += amount;
         log.info("payment.refunded", { reservationId, paymentId: p.id, amount });
       } catch (err) {
-        log.error("payment.refund_failed", { reservationId, paymentId: p.id, err });
+        if (!(await flagIfUnknown("payment", p.id, reservationId, "refund", err))) {
+          log.error("payment.refund_failed", { reservationId, paymentId: p.id, err });
+        }
       }
     }
 
     if (closed) {
-      for (const p of pays.filter((p) => p.status === "PENDING" && p.providerPaymentId)) {
+      for (const p of pays.filter((p) => p.status === "PENDING" && p.providerPaymentId && !p.needsAttentionAt)) {
         try {
           const res = p.provider === SEED_PROVIDER ? { ...simulatedRefund(p, 0), status: "canceled" as const } : await provider.cancelPayment(p.providerPaymentId!);
           await recordProviderPayment(p.id, res);
           await db.update(payments).set({ status: "CANCELLED" }).where(and(eq(payments.id, p.id), eq(payments.status, "PENDING")));
           out.paymentsCancelled++;
         } catch (err) {
-          // Usually a race: the payment already succeeded at the provider; its webhook will trigger a refund.
-          log.warn("payment.cancel_failed", { reservationId, paymentId: p.id, err });
+          if (!(await flagIfUnknown("payment", p.id, reservationId, "cancel", err))) {
+            // Usually a race: the payment already succeeded at the provider; its webhook will trigger a refund.
+            log.warn("payment.cancel_failed", { reservationId, paymentId: p.id, err });
+          }
         }
       }
     }
 
     // Deposits
-    const held = deps.filter((d) => d.status === "AUTHORIZED" && d.providerHoldId);
+    const held = deps.filter((d) => d.status === "AUTHORIZED" && d.providerHoldId && !d.needsAttentionAt);
     if (closed || r.status === "RETURNED") {
       let toCapture = r.status === "RETURNED" ? r.lateFeeFils : 0;
       for (const d of held) {
@@ -617,7 +622,9 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
             out.depositsReleased++;
           }
         } catch (err) {
-          log.error("deposit.settle_failed", { reservationId, depositId: d.id, err });
+          if (!(await flagIfUnknown("deposit", d.id, reservationId, toCapture > 0 ? "capture" : "release", err))) {
+            log.error("deposit.settle_failed", { reservationId, depositId: d.id, err });
+          }
         }
       }
       if (toCapture > 0 && r.status === "RETURNED") {
@@ -651,7 +658,39 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
   }
 }
 
-/** Reservations whose money is not settled yet (used by the release-holds job). */
+/**
+ * A provider that answers "not_found" for an id will never know it (e.g. state lost, wrong account).
+ * Flag the row once (needs_attention_at + audit log) so settlement and the job stop retrying it;
+ * staff resolve it by hand. Returns true when the error was of that kind.
+ */
+async function flagIfUnknown(
+  kind: "payment" | "deposit",
+  rowId: string,
+  reservationId: string,
+  operation: string,
+  err: unknown,
+): Promise<boolean> {
+  if (!isPaymentError(err, "not_found")) return false;
+  const table = kind === "payment" ? payments : deposits;
+  const flagged = await db
+    .update(table)
+    .set({ needsAttentionAt: new Date() })
+    .where(and(eq(table.id, rowId), sql`${table.needsAttentionAt} IS NULL`))
+    .returning({ id: table.id });
+  if (flagged.length) {
+    log.error(`${kind}.needs_attention`, { reservationId, [`${kind}Id`]: rowId, operation, err });
+    await writeAudit(db, {
+      actorUserId: null,
+      action: `${kind}.needs_attention`,
+      entityType: kind,
+      entityId: rowId,
+      data: { reservationId, operation, reason: err.message },
+    });
+  }
+  return true;
+}
+
+/** Reservations whose money is not settled yet (used by the release-holds job). Rows flagged needs_attention are skipped. */
 export async function findUnsettledReservations(limit = 100): Promise<string[]> {
   const rows = await db
     .select({ id: reservations.id })
@@ -659,19 +698,23 @@ export async function findUnsettledReservations(limit = 100): Promise<string[]> 
     .where(
       sql`(
         (${reservations.status} IN ('EXPIRED','CANCELLED','REFUNDED','RETURNED')
-          AND EXISTS (SELECT 1 FROM ${deposits} d WHERE d.reservation_id = ${reservations.id} AND d.status = 'AUTHORIZED'))
+          AND EXISTS (SELECT 1 FROM ${deposits} d WHERE d.reservation_id = ${reservations.id} AND d.status = 'AUTHORIZED'
+            AND d.needs_attention_at IS NULL))
         OR (${reservations.status} IN ('EXPIRED','CANCELLED','REFUNDED')
-          AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id} AND p.status = 'PENDING' AND p.provider_payment_id IS NOT NULL))
+          AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id} AND p.status = 'PENDING'
+            AND p.provider_payment_id IS NOT NULL AND p.needs_attention_at IS NULL))
         OR (${reservations.status} = 'EXPIRED' AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id}
-              AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils))
+              AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils AND p.needs_attention_at IS NULL))
         OR (${reservations.status} IN ('CANCELLED','REFUNDED')
             AND (SELECT coalesce(sum(p.amount_fils) FILTER (WHERE p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED','REFUNDED')), 0)
                       - coalesce(sum(p.refunded_fils), 0) FROM ${payments} p WHERE p.reservation_id = ${reservations.id})
-                > ${reservations.cancellationFeeFils})
+                > ${reservations.cancellationFeeFils}
+            AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id}
+              AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils AND p.needs_attention_at IS NULL))
         OR (${reservations.status} IN ('PENDING','CONFIRMED','PICKED_UP','RETURNED') AND ${reservations.refundedFils} >
               (SELECT coalesce(sum(p.refunded_fils), 0) FROM ${payments} p WHERE p.reservation_id = ${reservations.id})
             AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id}
-              AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils))
+              AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils AND p.needs_attention_at IS NULL))
       )`,
     )
     .orderBy(asc(reservations.updatedAt))

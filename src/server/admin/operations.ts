@@ -19,6 +19,7 @@ import {
   vehicles,
 } from "@/lib/db/schema";
 import { writeAudit } from "../audit";
+import { flagStrandedBookings } from "../availability";
 import { assertAdmin, db, mapOverlapError } from "../db";
 import { parseInput, ServiceError } from "../errors";
 import { storeDamagePhotos } from "../files";
@@ -216,6 +217,8 @@ export async function checkIn(actorUserId: string, input: z.input<typeof checkIn
       .update(vehicles)
       .set({ status: i.needsMaintenance ? "MAINTENANCE" : "AVAILABLE", mileageKm: i.mileageKm, branchId: returnBranchId })
       .where(eq(vehicles.id, r.vehicleId));
+    // Returned somewhere other than booked: the next booking may need the car moved.
+    if (returnBranchId !== r.returnBranchId) await flagStrandedBookings(tx, r.vehicleId, returnedAt, returnedAt, actorUserId);
     await writeAudit(tx, {
       actorUserId,
       action: "reservation.checked_in",

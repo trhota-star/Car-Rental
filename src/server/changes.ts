@@ -2,10 +2,10 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { getPaymentProvider, PaymentError, type PaymentProvider } from "@/lib/payments";
+import { getPaymentProvider, isPaymentError, type PaymentProvider } from "@/lib/payments";
 import { payments, reservationExtras, reservations, vehicles, type Reservation } from "@/lib/db/schema";
 import { writeAudit } from "./audit";
-import { isVehicleAvailable } from "./availability";
+import { findStrandedBooking, flagStrandedBookings, isVehicleAvailable } from "./availability";
 import { db, isAdmin, mapOverlapError, type Executor } from "./db";
 import { parseInput, ServiceError } from "./errors";
 import { log } from "./log";
@@ -110,6 +110,8 @@ export async function cancelReservation(input: CancelReservationInput, opts: Opt
       entityId: r.id,
       data: { feeFils: t.feeFils, refundFils: t.refundFils, reason: i.reason },
     });
+    // A cancelled one-way booking may leave the next booking's car at the wrong branch: flag for staff.
+    await flagStrandedBookings(tx, r.vehicleId, r.pickupAt, now, i.userId);
     return t;
   });
   log.info("reservation.cancelled", { reservationId: i.reservationId, feeFils: t.feeFils, refundFils: t.refundFils });
@@ -166,7 +168,13 @@ async function computeChange(ex: Executor, r: Reservation, pickupAt: Date, retur
     if (diff > 0) amountDueFils = diff;
     else refundFils = -diff;
   }
-  const available = await isVehicleAvailable(r.vehicleId, pickupAt, returnAt, { now, excludeReservationId: r.id, ex });
+  const available = await isVehicleAvailable(r.vehicleId, pickupAt, returnAt, {
+    now,
+    excludeReservationId: r.id,
+    ex,
+    pickupBranchId: r.pickupBranchId,
+    returnBranchId: r.returnBranchId,
+  });
   return { quote, amountDueFils, refundFils, available };
 }
 
@@ -235,7 +243,7 @@ export async function changeReservationDates(input: ChangeDatesInput, opts: Opts
           throw new ServiceError("PAYMENT_FAILED", "The price difference could not be charged");
         }
       } catch (err) {
-        if (err instanceof PaymentError) throw new ServiceError("PAYMENT_PROVIDER_ERROR", err.message);
+        if (isPaymentError(err)) throw new ServiceError("PAYMENT_PROVIDER_ERROR", err.message);
         throw err;
       }
     }
@@ -266,6 +274,13 @@ export async function changeReservationDates(input: ChangeDatesInput, opts: Opts
         .returning();
       await tx.delete(reservationExtras).where(eq(reservationExtras.reservationId, r.id));
       await insertExtras(tx, r.id, c.quote);
+      // Moving a one-way booking must not strand the booking that relied on it (customer-initiated, so refuse).
+      const stranded = await findStrandedBooking(tx, r.vehicleId, r.pickupAt < i.pickupAt ? r.pickupAt : i.pickupAt, now);
+      if (stranded) {
+        throw new ServiceError("VEHICLE_UNAVAILABLE", "This change would leave the vehicle at the wrong branch for its next booking", {
+          reason: "STRANDS_NEXT_BOOKING",
+        });
+      }
       await writeAudit(tx, {
         actorUserId: i.userId,
         action: "reservation.dates_changed",

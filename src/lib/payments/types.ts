@@ -92,3 +92,13 @@ export class PaymentError extends Error {
     this.name = "PaymentError";
   }
 }
+
+/**
+ * Bundle-safe check. Next/Turbopack can load this module more than once (route vs server chunks), so
+ * `instanceof PaymentError` may be false for a real PaymentError. Match on the shape instead.
+ */
+export function isPaymentError(err: unknown, code?: string): err is PaymentError {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: unknown; code?: unknown };
+  return e.name === "PaymentError" && typeof e.code === "string" && (code === undefined || e.code === code);
+}

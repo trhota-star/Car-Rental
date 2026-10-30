@@ -18,7 +18,7 @@ import {
   type Reservation,
 } from "@/lib/db/schema";
 import { writeAudit } from "./audit";
-import { isVehicleAvailable } from "./availability";
+import { assertBookable, flagStrandedBookings } from "./availability";
 import { db, mapOverlapError, pgError, PG_EXCLUSION_VIOLATION, PG_UNIQUE_VIOLATION, type Executor, type Tx } from "./db";
 import { parseInput, ServiceError } from "./errors";
 import { LICENCE_KEY_RE, isLicenceKeyFor } from "./files";
@@ -152,10 +152,6 @@ export async function createReservation(
         if (vehicle.status === "RETIRED" || vehicle.status === "MAINTENANCE") {
           throw new ServiceError("VEHICLE_UNAVAILABLE", "This vehicle is not available for rent");
         }
-        if (vehicle.branchId !== i.pickupBranchId) {
-          throw new ServiceError("VEHICLE_UNAVAILABLE", "This vehicle is not available at the chosen pick-up branch");
-        }
-
         const { quote } = await quoteVehicle(tx, {
           vehicleId: vehicle.id,
           pickupBranchId: i.pickupBranchId,
@@ -166,9 +162,16 @@ export async function createReservation(
           now,
         });
 
-        if (!(await isVehicleAvailable(vehicle.id, i.pickupAt, i.returnAt, { now, ex: tx }))) {
-          throw new ServiceError("VEHICLE_UNAVAILABLE", "The vehicle is not available for these dates");
-        }
+        // Overlaps + one-way location rules (vehicle at the pick-up branch at pickupAt; the next
+        // booking picks up where this one returns). Under the vehicle lock, so it cannot race.
+        await assertBookable(tx, {
+          vehicleId: vehicle.id,
+          pickupAt: i.pickupAt,
+          returnAt: i.returnAt,
+          pickupBranchId: i.pickupBranchId,
+          returnBranchId,
+          now,
+        });
 
         const profileId = await upsertDriverProfile(tx, i.userId, i.driver);
         const [created] = await tx
@@ -284,9 +287,10 @@ export async function expireStaleHoldsForVehicle(tx: Tx, vehicleId: string, now:
         sql`${reservations.holdExpiresAt} <= ${now.toISOString()}::timestamptz`,
       ),
     )
-    .returning({ id: reservations.id });
+    .returning({ id: reservations.id, pickupAt: reservations.pickupAt });
   for (const r of rows) {
     await writeAudit(tx, { actorUserId: null, action: "reservation.expired", entityType: "reservation", entityId: r.id });
+    await flagStrandedBookings(tx, vehicleId, r.pickupAt, now);
   }
   return rows.map((r) => r.id);
 }

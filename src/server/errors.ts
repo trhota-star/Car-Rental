@@ -29,7 +29,15 @@ export class ServiceError extends Error {
 }
 
 export function isServiceError(err: unknown, code?: ErrorCode): err is ServiceError {
-  return err instanceof ServiceError && (code === undefined || err.code === code);
+  // Shape check, not instanceof: bundlers may load this module twice (see isPaymentError).
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: unknown; code?: unknown };
+  return (
+    e.name === "ServiceError" &&
+    typeof e.code === "string" &&
+    (ERROR_CODES as readonly string[]).includes(e.code) &&
+    (code === undefined || e.code === code)
+  );
 }
 
 /** Parse service input with Zod; invalid input becomes ServiceError("VALIDATION_ERROR"). */

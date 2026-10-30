@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { pool } from "@/lib/db";
 import { FakePaymentProvider, httpWebhookDeliver } from "./fake-provider";
+import { MemoryFakeProviderStore, PgFakeProviderStore } from "./fake-store";
 import { StripePaymentProvider } from "./stripe-provider";
 import type { PaymentProvider } from "./types";
 
@@ -10,6 +12,8 @@ const settings = z.object({
   FAKE_PAYMENT_WEBHOOK_SECRET: z.string().optional(),
   FAKE_PAYMENT_WEBHOOK_URL: z.url().optional(),
   FAKE_PAYMENT_DUPLICATE_WEBHOOKS: z.stringbool().default(false),
+  /** db (default) = durable state in the fake_payment_provider_* tables of DATABASE_URL; memory = lost on restart. */
+  FAKE_PAYMENT_STORE: z.enum(["db", "memory"]).default("db"),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
 });
@@ -23,6 +27,8 @@ export function createPaymentProvider(env: Record<string, string | undefined> = 
         webhookSecret: s.FAKE_PAYMENT_WEBHOOK_SECRET,
         deliver: s.FAKE_PAYMENT_WEBHOOK_URL ? httpWebhookDeliver(s.FAKE_PAYMENT_WEBHOOK_URL) : undefined,
         duplicateWebhooks: s.FAKE_PAYMENT_DUPLICATE_WEBHOOKS,
+        // The pool connects lazily, so creating the store never opens a connection by itself.
+        store: s.FAKE_PAYMENT_STORE === "db" ? new PgFakeProviderStore(pool) : new MemoryFakeProviderStore(),
       });
     case "stripe":
       // UNVERIFIED (no Stripe account yet): test-mode keys only.

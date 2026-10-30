@@ -2,6 +2,7 @@ import "server-only";
 import { and, asc, eq, inArray, notInArray, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import {
+  auditLogs,
   branches,
   maintenanceBlocks,
   reservations,
@@ -17,6 +18,7 @@ import {
 } from "@/lib/db/schema";
 import { db, type Executor } from "./db";
 import { parseInput, ServiceError } from "./errors";
+import { log } from "./log";
 import { dailyRateFor, loadActiveRules, rentalWindowSchema, validateRentalWindow } from "./pricing";
 import { computeQuote } from "./pricing-core";
 import { addDaysToDate, localDate, zonedDayStart } from "./time";
@@ -42,6 +44,145 @@ export function vehicleFreeSql(from: Date, to: Date, now: Date, excludeReservati
       AND ${reservations.period} && ${range} AND ${blockingReservation(now)}${exclude})
     AND NOT EXISTS (SELECT 1 FROM ${maintenanceBlocks} WHERE ${maintenanceBlocks.vehicleId} = ${vehicles.id}
       AND ${maintenanceBlocks.cancelledAt} IS NULL AND ${maintenanceBlocks.period} && ${range})`;
+}
+
+// ---------------------------------------------------------------------------
+// Vehicle location (one-way rentals)
+//
+// Where a vehicle is at time T: the return branch of its latest blocking reservation that ends at or
+// before T; if there is none, vehicles.branch_id (its current branch; check-in moves it to the actual
+// return branch). A booking [pickupAt, returnAt) from branch X to branch Y is allowed only if
+//   1. the vehicle is at X at pickupAt, and
+//   2. it does not strand the next blocking reservation: the next one starting at or after returnAt
+//      must pick up at Y (if there is a next one).
+// Blocking = CONFIRMED / PICKED_UP / unexpired PENDING (same as overlaps).
+// ---------------------------------------------------------------------------
+
+/** SQL: branch id where the vehicle (outer `vehicles` row) is at time `at`. */
+export function locationAtSql(at: Date, now: Date, excludeReservationId?: string): SQL {
+  const exclude = excludeReservationId ? sql` AND ${reservations.id} <> ${excludeReservationId}` : sql``;
+  return sql`COALESCE((SELECT ${reservations.returnBranchId} FROM ${reservations}
+      WHERE ${reservations.vehicleId} = ${vehicles.id} AND ${blockingReservation(now)}
+        AND ${reservations.returnAt} <= ${ts(at)}${exclude}
+      ORDER BY ${reservations.returnAt} DESC LIMIT 1), ${vehicles.branchId})`;
+}
+
+/** SQL: pick-up branch of the next blocking reservation starting at or after `at` (NULL if none). */
+export function nextPickupBranchSql(at: Date, now: Date, excludeReservationId?: string): SQL {
+  const exclude = excludeReservationId ? sql` AND ${reservations.id} <> ${excludeReservationId}` : sql``;
+  return sql`(SELECT ${reservations.pickupBranchId} FROM ${reservations}
+      WHERE ${reservations.vehicleId} = ${vehicles.id} AND ${blockingReservation(now)}
+        AND ${reservations.pickupAt} >= ${ts(at)}${exclude}
+      ORDER BY ${reservations.pickupAt} ASC LIMIT 1)`;
+}
+
+/** SQL condition: rules 1 and 2 above hold for a booking X -> Y over [pickupAt, returnAt). */
+export function locationOkSql(
+  pickupAt: Date,
+  returnAt: Date,
+  pickupBranchId: string,
+  returnBranchId: string,
+  now: Date,
+  excludeReservationId?: string,
+): SQL {
+  return sql`(${locationAtSql(pickupAt, now, excludeReservationId)} = ${pickupBranchId}::uuid
+    AND COALESCE(${nextPickupBranchSql(returnAt, now, excludeReservationId)}, ${returnBranchId}::uuid) = ${returnBranchId}::uuid)`;
+}
+
+export type AvailabilityProblem = "NOT_FOUND" | "NOT_RENTABLE" | "OVERLAP" | "WRONG_LOCATION" | "STRANDS_NEXT_BOOKING";
+
+const PROBLEM_MESSAGES: Record<AvailabilityProblem, string> = {
+  NOT_FOUND: "Vehicle not found",
+  NOT_RENTABLE: "This vehicle is not available for rent",
+  OVERLAP: "The vehicle is not available for these dates",
+  WRONG_LOCATION: "This vehicle will not be at the chosen pick-up branch at that time",
+  STRANDS_NEXT_BOOKING: "This vehicle must be returned to the branch of its next booking",
+};
+
+/**
+ * Why a vehicle cannot be booked for [pickupAt, returnAt) from pickupBranchId to returnBranchId
+ * (null = bookable). Call inside the reservation transaction after locking the vehicle row.
+ */
+export async function availabilityProblem(
+  ex: Executor,
+  p: {
+    vehicleId: string;
+    pickupAt: Date;
+    returnAt: Date;
+    pickupBranchId: string;
+    returnBranchId: string;
+    now: Date;
+    excludeReservationId?: string;
+  },
+): Promise<AvailabilityProblem | null> {
+  const [row] = await ex
+    .select({
+      status: vehicles.status,
+      free: sql<boolean>`${vehicleFreeSql(p.pickupAt, p.returnAt, p.now, p.excludeReservationId)}`,
+      locationAt: sql<string>`${locationAtSql(p.pickupAt, p.now, p.excludeReservationId)}`,
+      nextPickup: sql<string | null>`${nextPickupBranchSql(p.returnAt, p.now, p.excludeReservationId)}`,
+    })
+    .from(vehicles)
+    .where(eq(vehicles.id, p.vehicleId));
+  if (!row) return "NOT_FOUND";
+  if (row.status === "RETIRED" || row.status === "MAINTENANCE") return "NOT_RENTABLE";
+  if (!(p.returnAt > p.pickupAt) || !row.free) return "OVERLAP";
+  if (row.locationAt !== p.pickupBranchId) return "WRONG_LOCATION";
+  if (row.nextPickup !== null && row.nextPickup !== p.returnBranchId) return "STRANDS_NEXT_BOOKING";
+  return null;
+}
+
+/** Throw VEHICLE_UNAVAILABLE (details.reason = the problem) unless the booking is possible. */
+export async function assertBookable(ex: Executor, p: Parameters<typeof availabilityProblem>[1]): Promise<void> {
+  const problem = await availabilityProblem(ex, p);
+  if (problem === "NOT_FOUND") throw new ServiceError("NOT_FOUND", PROBLEM_MESSAGES.NOT_FOUND);
+  if (problem) throw new ServiceError("VEHICLE_UNAVAILABLE", PROBLEM_MESSAGES[problem], { reason: problem });
+}
+
+/**
+ * The first blocking reservation starting at or after `after`, if the vehicle will NOT be at its
+ * pick-up branch by then (e.g. the one-way booking that would have brought it there was cancelled).
+ */
+export async function findStrandedBooking(ex: Executor, vehicleId: string, after: Date, now: Date) {
+  const [next] = await ex
+    .select({ id: reservations.id, pickupAt: reservations.pickupAt, pickupBranchId: reservations.pickupBranchId })
+    .from(reservations)
+    .where(and(eq(reservations.vehicleId, vehicleId), blockingReservation(now), sql`${reservations.pickupAt} >= ${ts(after)}`))
+    .orderBy(asc(reservations.pickupAt))
+    .limit(1);
+  if (!next) return null;
+  const [loc] = await ex
+    .select({ at: sql<string>`${locationAtSql(next.pickupAt, now, next.id)}` })
+    .from(vehicles)
+    .where(eq(vehicles.id, vehicleId));
+  if (!loc || loc.at === next.pickupBranchId) return null;
+  return { reservationId: next.id, pickupAt: next.pickupAt, expectedAtBranchId: loc.at, neededAtBranchId: next.pickupBranchId };
+}
+
+/**
+ * After a blocking reservation disappears (cancel, hold expiry) or the car comes back somewhere else
+ * (check-in at another branch), the next booking may now start where the vehicle won't be. Customers
+ * can always cancel and holds always expire, so this cannot be prevented; flag it for staff instead
+ * (audit `vehicle.relocation_required` + warn log) so they move the car or contact the customer.
+ */
+export async function flagStrandedBookings(
+  ex: Executor,
+  vehicleId: string,
+  after: Date,
+  now: Date,
+  actorUserId: string | null = null,
+): Promise<number> {
+  const s = await findStrandedBooking(ex, vehicleId, after, now);
+  if (!s) return 0;
+  await ex.insert(auditLogs).values({
+    actorUserId,
+    action: "vehicle.relocation_required",
+    entityType: "reservation",
+    entityId: s.reservationId,
+    data: { vehicleId, expectedAtBranchId: s.expectedAtBranchId, neededAtBranchId: s.neededAtBranchId, pickupAt: s.pickupAt },
+  });
+  log.warn("vehicle.relocation_required", { vehicleId, reservationId: s.reservationId, from: s.expectedAtBranchId, to: s.neededAtBranchId });
+  return 1;
 }
 
 export interface Feature {
@@ -108,9 +249,10 @@ export async function searchVehicles(input: SearchVehiclesInput, now: Date = new
   validateRentalWindow(pickupBranch, returnBranch, i.pickupAt, i.returnAt, now);
 
   const conds: SQL[] = [
-    eq(vehicles.branchId, i.pickupBranchId),
     notInArray(vehicles.status, [...UNRENTABLE]),
     vehicleFreeSql(i.pickupAt, i.returnAt, now),
+    // Where the car will be at pick-up (one-way rentals move it), and the next booking's branch.
+    locationOkSql(i.pickupAt, i.returnAt, i.pickupBranchId, returnBranchId, now),
   ];
   if (i.categoryId) conds.push(eq(vehicles.categoryId, i.categoryId));
   if (i.transmission) conds.push(eq(vehicles.transmission, i.transmission));
@@ -189,7 +331,15 @@ export async function isVehicleAvailable(
   vehicleId: string,
   pickupAt: Date,
   returnAt: Date,
-  opts: { now?: Date; excludeReservationId?: string; ex?: Executor } = {},
+  opts: {
+    now?: Date;
+    excludeReservationId?: string;
+    ex?: Executor;
+    /** When given, also require the vehicle to be at this branch at pick-up (one-way rentals). */
+    pickupBranchId?: string;
+    /** Defaults to pickupBranchId; must match the next booking's pick-up branch. */
+    returnBranchId?: string;
+  } = {},
 ): Promise<boolean> {
   const p = parseInput(z.object({ vehicleId: z.uuid(), pickupAt: z.date(), returnAt: z.date() }), {
     vehicleId,
@@ -205,6 +355,16 @@ export async function isVehicleAvailable(
         eq(vehicles.id, p.vehicleId),
         notInArray(vehicles.status, [...UNRENTABLE]),
         vehicleFreeSql(p.pickupAt, p.returnAt, opts.now ?? new Date(), opts.excludeReservationId),
+        opts.pickupBranchId
+          ? locationOkSql(
+              p.pickupAt,
+              p.returnAt,
+              opts.pickupBranchId,
+              opts.returnBranchId ?? opts.pickupBranchId,
+              opts.now ?? new Date(),
+              opts.excludeReservationId,
+            )
+          : undefined,
       ),
     );
   return rows.length === 1;
@@ -219,7 +379,11 @@ export type CalendarDayStatus = "available" | "partial" | "booked" | "maintenanc
 export interface VehicleCalendar {
   vehicleId: string;
   timeZone: string;
-  days: { date: string; status: CalendarDayStatus }[];
+  /**
+   * `branchId`: where the vehicle is expected to be at the start of that (branch-local) day, taking
+   * one-way bookings into account. Only offer pick-up on days where it equals the chosen branch.
+   */
+  days: { date: string; status: CalendarDayStatus; branchId: string }[];
   /** Busy intervals (UTC), no customer details. */
   busy: { start: Date; end: Date; kind: "reservation" | "maintenance" }[];
 }
@@ -240,7 +404,7 @@ export async function getVehicleCalendar(
 ): Promise<VehicleCalendar> {
   const i = parseInput(calendarInput, { vehicleId, ...range });
   const [row] = await db
-    .select({ status: vehicles.status, timeZone: branches.timeZone })
+    .select({ status: vehicles.status, timeZone: branches.timeZone, branchId: vehicles.branchId })
     .from(vehicles)
     .innerJoin(branches, eq(branches.id, vehicles.branchId))
     .where(eq(vehicles.id, i.vehicleId));
@@ -276,15 +440,33 @@ export async function getVehicleCalendar(
     ...mb.map((m) => ({ ...m, kind: "maintenance" as const })),
   ].sort((a, b) => a.start.getTime() - b.start.getTime());
 
+  // Relocations: blocking reservations ending before the range ends, by return time.
+  const moves = await db
+    .select({ at: reservations.returnAt, branchId: reservations.returnBranchId })
+    .from(reservations)
+    .where(
+      and(
+        eq(reservations.vehicleId, i.vehicleId),
+        blockingReservation(now),
+        sql`${reservations.returnAt} <= ${ts(end)}`,
+      ),
+    )
+    .orderBy(asc(reservations.returnAt));
+  const locationAt = (t: number) => {
+    let loc = row.branchId;
+    for (const m of moves) if (m.at.getTime() <= t) loc = m.branchId;
+    return loc;
+  };
+
   const days: VehicleCalendar["days"] = [];
   for (let d = 0; d < dayCount; d++) {
     const date = addDaysToDate(from, d);
     if (row.status === "RETIRED") {
-      days.push({ date, status: "booked" });
+      days.push({ date, status: "booked", branchId: row.branchId });
       continue;
     }
     if (row.status === "MAINTENANCE") {
-      days.push({ date, status: "maintenance" });
+      days.push({ date, status: "maintenance", branchId: row.branchId });
       continue;
     }
     const ds = zonedDayStart(date, tzName).getTime();
@@ -307,7 +489,7 @@ export async function getVehicleCalendar(
     let status: CalendarDayStatus = "available";
     if (covered >= de - ds) status = overlaps.every((o) => o.kind === "maintenance") ? "maintenance" : "booked";
     else if (covered > 0) status = "partial";
-    days.push({ date, status });
+    days.push({ date, status, branchId: locationAt(ds) });
   }
   return { vehicleId: i.vehicleId, timeZone: tzName, days, busy };
 }

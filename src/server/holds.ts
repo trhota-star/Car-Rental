@@ -2,6 +2,7 @@ import "server-only";
 import { and, eq, sql } from "drizzle-orm";
 import { reservations } from "@/lib/db/schema";
 import { writeAudit } from "./audit";
+import { flagStrandedBookings } from "./availability";
 import { db } from "./db";
 import { log } from "./log";
 import { findUnsettledReservations, settleReservation } from "./payments";
@@ -34,9 +35,11 @@ export async function releaseExpiredHolds(
           sql`${reservations.holdExpiresAt} <= ${now.toISOString()}::timestamptz`,
         ),
       )
-      .returning({ id: reservations.id });
+      .returning({ id: reservations.id, vehicleId: reservations.vehicleId, pickupAt: reservations.pickupAt });
     for (const r of rows) {
       await writeAudit(tx, { actorUserId: null, action: "reservation.expired", entityType: "reservation", entityId: r.id });
+      // An expired one-way hold can leave a later booking's car at the wrong branch: flag for staff.
+      await flagStrandedBookings(tx, r.vehicleId, r.pickupAt, now);
     }
     return rows.map((r) => r.id);
   });

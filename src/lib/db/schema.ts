@@ -499,6 +499,8 @@ export const payments = pgTable(
     currency: char("currency", { length: 3 }).notNull().default("AED"),
     status: paymentStatus("status").notNull().default("PENDING"),
     failureReason: text("failure_reason"),
+    /** Set when the provider permanently does not know this payment; settlement skips it (staff must act). */
+    needsAttentionAt: tz("needs_attention_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -525,6 +527,8 @@ export const deposits = pgTable(
     currency: char("currency", { length: 3 }).notNull().default("AED"),
     status: depositStatus("status").notNull().default("PENDING"),
     failureReason: text("failure_reason"),
+    /** Set when the provider permanently does not know this hold; settlement skips it (staff must act). */
+    needsAttentionAt: tz("needs_attention_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -548,6 +552,37 @@ export const paymentWebhookEvents = pgTable(
     processedAt: tz("processed_at"),
   },
   (t) => [unique("payment_webhook_events_uq").on(t.provider, t.eventId)],
+);
+
+/**
+ * Durable state of the LOCAL fake payment provider (PAYMENT_PROVIDER=fake), so payments and deposit
+ * holds survive dev-server restarts. Not used by real providers.
+ */
+export const fakeProviderObjects = pgTable("fake_payment_provider_objects", {
+  id: text("id").primaryKey(),
+  /** "payment" | "hold" */
+  kind: text("kind").notNull(),
+  data: jsonb("data").notNull(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+export const fakeProviderIdempotency = pgTable("fake_payment_provider_idempotency", {
+  /** `<scope>:<idempotency key>` */
+  key: text("key").primaryKey(),
+  objectId: text("object_id").notNull(),
+  createdAt: createdAt(),
+});
+
+export const fakeProviderEvents = pgTable(
+  "fake_payment_provider_events",
+  {
+    id: text("id").primaryKey(),
+    seq: integer("seq").generatedAlwaysAsIdentity(),
+    data: jsonb("data").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("fake_payment_provider_events_seq_idx").on(t.seq)],
 );
 
 // ---------------------------------------------------------------------------
