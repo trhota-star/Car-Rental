@@ -1,13 +1,15 @@
 import { defineConfig, devices } from "@playwright/test";
-import { testDatabaseUrl } from "./tests/helpers/env";
+import { e2eDatabaseUrl } from "./tests/helpers/env";
 
-// E2E runs against its OWN server on the TEST database (never dev):
+// E2E runs against its OWN server on the E2E test database driveeasy_e2e_test (never dev):
 //   default            -> `next build` + `next start` on port 3100 (production mode; dev can't run twice per project)
 //   E2E_BASE_URL=...   -> reuse an already running server (you are responsible for its DB)
 //   E2E_SERVER=dev     -> `next dev` on 3100 (only when no other `next dev` is running here)
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 const baseURL = process.env.E2E_BASE_URL ?? `http://localhost:${PORT}`;
-const testDb = testDatabaseUrl();
+// Browser/API tests use their own database so they never collide with a Vitest run.
+const testDb = e2eDatabaseUrl();
+process.env.QA_DATABASE_URL = testDb; // tests/api helpers read the same DB
 // The DB is reset + seeded first (prepare-db), then the app is built/started against it.
 const prepareDb = "pnpm exec tsx tests/e2e/prepare-db.ts";
 const serverCommand =

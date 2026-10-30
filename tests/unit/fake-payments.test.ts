@@ -135,6 +135,8 @@ describe("FakePaymentProvider webhooks", () => {
 describe("createPaymentProvider", () => {
   it("picks the provider from settings", () => {
     expect(createPaymentProvider({ PAYMENT_PROVIDER: "fake", FAKE_PAYMENT_WEBHOOK_SECRET: "x" }).name).toBe("fake");
-    expect(() => createPaymentProvider({ PAYMENT_PROVIDER: "stripe" })).toThrow(/not implemented/);
+    // Stripe adapter exists (unverified until cloud keys); without keys it must refuse to start.
+    expect(() => createPaymentProvider({ PAYMENT_PROVIDER: "stripe" })).toThrow(/STRIPE_SECRET_KEY/);
+    expect(() => createPaymentProvider({ PAYMENT_PROVIDER: "fake" })).toThrow(/FAKE_PAYMENT_WEBHOOK_SECRET/);
   });
 });

@@ -6,6 +6,41 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { testDatabaseUrl } from "./env";
 
+/** Advisory-lock key serialising whole test runs that reset the same database (other agents, parallel runs). */
+const RUN_LOCK_KEY = 0x0de_7e57;
+
+/**
+ * Hold a session-level advisory lock until the returned release() is called. A second run against the same
+ * database waits here instead of dropping the schema under the first run.
+ */
+export async function acquireRunLock(): Promise<() => Promise<void>> {
+  const client = await connectTestClient();
+  await client.query("SET application_name = 'qa-run-lock'");
+  const { rows } = await client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [RUN_LOCK_KEY]);
+  if (!rows[0].ok) {
+    console.log("[qa] another test run is using this database; waiting for it to finish...");
+    await client.query("SELECT pg_advisory_lock($1)", [RUN_LOCK_KEY]);
+  }
+  return async () => {
+    await client.query("SELECT pg_advisory_unlock($1)", [RUN_LOCK_KEY]).catch(() => {});
+    await client.end().catch(() => {});
+  };
+}
+
+/** Create the database named in `url` if it does not exist (connects through TEST_DATABASE_URL). */
+export async function ensureDatabase(url: string): Promise<void> {
+  const name = new URL(url).pathname.slice(1);
+  if (!/^[a-z0-9_]+$/.test(name)) throw new Error(`Bad database name ${name}`);
+  const admin = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+  await admin.connect();
+  try {
+    const { rows } = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [name]);
+    if (!rows.length) await admin.query(`CREATE DATABASE "${name}"`);
+  } finally {
+    await admin.end();
+  }
+}
+
 export const MIGRATIONS_DIR = path.resolve(__dirname, "../../drizzle");
 
 export function hasMigrations(): boolean {
