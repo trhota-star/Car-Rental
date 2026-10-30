@@ -22,6 +22,8 @@ export default defineConfig({
   timeout: 60_000,
   use: { baseURL, trace: "retain-on-failure", screenshot: "only-on-failure" },
   projects: [
+    // HTTP-level tests (auth, authorization, webhooks): run once, no browser.
+    { name: "api", testDir: "./tests/api", use: { extraHTTPHeaders: { origin: baseURL } } },
     { name: "desktop-chrome", use: { ...devices["Desktop Chrome"] } },
     { name: "mobile-pixel7", use: { ...devices["Pixel 7"] } },
     { name: "mobile-iphone", use: { ...devices["iPhone 15"] } },
