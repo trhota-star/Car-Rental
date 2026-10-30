@@ -5,7 +5,7 @@ import { Suspense } from "react";
 import { formatDateTime, formatMoney } from "@/components/format";
 import { PriceBreakdown } from "@/components/price-breakdown";
 import { StatusBadge } from "@/components/status-badge";
-import { Card, CardBody, CardHeader, CardTitle, DescriptionList, Field, Input, PageHeader, PageSkeleton, Select, Textarea } from "@/components/ui";
+import { Alert, Card, CardBody, CardHeader, CardTitle, DescriptionList, Field, Input, PageHeader, PageSkeleton, Select, Textarea } from "@/components/ui";
 import { utcToZoned } from "@/components/zoned-time";
 import { requireAdmin } from "@/lib/auth-session";
 import { listAllBranches } from "@/server/admin/catalog";
@@ -18,16 +18,17 @@ import { DamageForm, DamageList } from "../../_lib/damage";
 
 export const metadata: Metadata = { title: "Admin · Reservation" };
 
-export default function AdminReservationPage({ params }: PageProps<"/admin/reservations/[id]">) {
+export default function AdminReservationPage({ params, searchParams }: PageProps<"/admin/reservations/[id]">) {
   return (
     <Suspense fallback={<PageSkeleton cards={2} />}>
-      <Detail params={params} />
+      <Detail params={params} searchParams={searchParams} />
     </Suspense>
   );
 }
 
-async function Detail({ params }: Pick<PageProps<"/admin/reservations/[id]">, "params">) {
+async function Detail({ params, searchParams }: PageProps<"/admin/reservations/[id]">) {
   const { id } = await params;
+  const done = (await searchParams).done;
   const admin = await requireAdmin(`/admin/reservations/${id}`);
   const d = await getReservationByIdForAdmin(admin.id, id);
   if (!d) notFound();
@@ -55,7 +56,27 @@ async function Detail({ params }: Pick<PageProps<"/admin/reservations/[id]">, "p
         actions={<StatusBadge status={r.status} />}
       />
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_360px]">
+      {done === "checked-out" && r.status === "PICKED_UP" && (
+        <Alert tone="success" title="Vehicle checked out">
+          Handed over at {a ? `${a.pickupMileageKm.toLocaleString()} km, fuel ${a.pickupFuelPercent}%` : "pick-up"}.
+        </Alert>
+      )}
+      {done === "checked-in" && a?.returnedAt && (
+        <Alert tone="success" title="Vehicle checked in" >
+          <span data-testid="checkin-summary">
+            Late return fee {formatMoney(a.lateFeeFils)} · fuel charge {formatMoney(a.fuelChargeFils)} · total extra charges{" "}
+            {formatMoney(r.lateFeeFils)}.
+          </span>
+        </Alert>
+      )}
+      {done === "cancelled" && (
+        <Alert tone="success" title="Reservation cancelled">
+          Fee kept {formatMoney(r.cancellationFeeFils)} · refunded {formatMoney(r.refundedFils)}
+          {d.deposit ? ` · deposit ${d.deposit.status.toLowerCase()}` : ""}.
+        </Alert>
+      )}
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_360px]">
         <div className="space-y-6">
           <Card>
             <CardHeader>

@@ -79,7 +79,7 @@ async function Book({ params, searchParams }: PageProps<"/book/[vehicleId]">) {
         </Link>
       </nav>
       <PageHeader eyebrow="Step 1 of 3" title="Choose extras" description="Add anything you need. Prices update instantly." />
-      <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_380px]">
         <Card>
           <CardBody>
             {extras.length === 0 ? (

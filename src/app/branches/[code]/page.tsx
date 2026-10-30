@@ -40,7 +40,7 @@ async function Branch({ params }: Pick<PageProps<"/branches/[code]">, "params">)
           This branch is not taking new rentals at the moment.
         </Alert>
       )}
-      <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
         <Card className="self-start">
           <CardHeader>
             <CardTitle>Branch details</CardTitle>

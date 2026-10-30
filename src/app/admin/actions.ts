@@ -24,6 +24,7 @@ import {
 import { cancelReservation } from "@/server/changes";
 import { getVehicle } from "@/server/availability";
 import { ServiceError } from "@/server/errors";
+import { redirect } from "next/navigation";
 import { zonedToUtc } from "@/components/zoned-time";
 import { bool, fils, int, nullableStr, optStr, str, timeToMinutes } from "./_lib/form-data";
 import { runAdmin } from "./_lib/run";
@@ -204,12 +205,20 @@ export const cancelBlockAction: Action = async (_p, fd) =>
     return "Maintenance block cancelled.";
   }, [`/admin/fleet/${str(fd, "vehicleId")}`]);
 
+/** After a status change the form disappears, so show the outcome on the reloaded page instead. */
+function thenRedirect(fd: FormData, done: string, state: AdminState): AdminState {
+  if (state.ok) {
+    redirect(`/admin/reservations/${str(fd, "reservationId")}?done=${done}`);
+  }
+  return state;
+}
+
 // ---------------------------------------------------------------------------
 // Reservations: check-out, check-in, cancel, damage
 // ---------------------------------------------------------------------------
 
 export const checkOutAction: Action = async (_p, fd) =>
-  runAdmin("reservation.check_out", async (a) => {
+  thenRedirect(fd, "checked-out", await runAdmin("reservation.check_out", async (a) => {
     await checkOut(a.id, {
       reservationId: str(fd, "reservationId"),
       mileageKm: int(fd, "mileageKm") ?? NaN,
@@ -217,10 +226,10 @@ export const checkOutAction: Action = async (_p, fd) =>
       notes: optStr(fd, "notes"),
     });
     return "Vehicle checked out to the customer.";
-  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations", "/admin"]);
+  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations", "/admin"]));
 
 export const checkInAction: Action = async (_p, fd) =>
-  runAdmin("reservation.check_in", async (a) => {
+  thenRedirect(fd, "checked-in", await runAdmin("reservation.check_in", async (a) => {
     const tz = str(fd, "timeZone") || "Asia/Dubai";
     const returnedAt = optStr(fd, "returnedDate") ? zonedToUtc(str(fd, "returnedDate"), str(fd, "returnedTime"), tz) : undefined;
     if (returnedAt === null) throw new ServiceError("VALIDATION_ERROR", "Enter a valid return date and time");
@@ -240,13 +249,13 @@ export const checkInAction: Action = async (_p, fd) =>
       res.damageChargeFils > 0 ? `damage ${(res.damageChargeFils / 100).toFixed(2)} AED` : null,
     ].filter(Boolean);
     return `Vehicle checked in: ${parts.join(", ")}. Total extra charges ${(res.totalChargesFils / 100).toFixed(2)} AED.`;
-  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations", "/admin"]);
+  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations", "/admin"]));
 
 export const adminCancelAction: Action = async (_p, fd) =>
-  runAdmin("reservation.cancel", async (a) => {
+  thenRedirect(fd, "cancelled", await runAdmin("reservation.cancel", async (a) => {
     const r = await cancelReservation({ reservationId: str(fd, "reservationId"), userId: a.id, reason: optStr(fd, "reason") });
     return `Reservation cancelled. Fee kept ${(r.feeFils / 100).toFixed(2)} AED, refund ${(r.refundFils / 100).toFixed(2)} AED.`;
-  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations"]);
+  }, [`/admin/reservations/${str(fd, "reservationId")}`, "/admin/reservations"]));
 
 export const createDamageAction: Action = async (_p, fd) =>
   runAdmin("damage.create", async (a) => {

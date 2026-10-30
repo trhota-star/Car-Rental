@@ -6,7 +6,7 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "outl
 export type ButtonSize = "sm" | "md" | "lg";
 
 const base =
-  "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60 aria-disabled:pointer-events-none aria-disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors text-center disabled:cursor-not-allowed disabled:opacity-60 aria-disabled:pointer-events-none aria-disabled:opacity-60";
 
 const variants: Record<ButtonVariant, string> = {
   primary: "bg-brand-600 text-white shadow-sm hover:bg-brand-700",
@@ -17,9 +17,10 @@ const variants: Record<ButtonVariant, string> = {
 };
 
 const sizes: Record<ButtonSize, string> = {
-  sm: "h-8 px-3 text-sm",
-  md: "h-10 px-4 text-sm",
-  lg: "h-12 px-6 text-base",
+  sm: "h-8 px-3 text-sm whitespace-nowrap",
+  md: "h-10 px-4 text-sm whitespace-nowrap",
+  // Large buttons carry long labels (amounts): let them wrap on narrow screens.
+  lg: "min-h-12 px-6 py-2 text-base",
 };
 
 export function buttonClass(variant: ButtonVariant = "primary", size: ButtonSize = "md", className?: string) {

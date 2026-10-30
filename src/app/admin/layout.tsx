@@ -12,6 +12,7 @@ const links = [
   { href: "/admin/damage", label: "Damage reports" },
 ];
 
+// Non-admins get a real 404 from src/proxy.ts; every page and action checks again.
 export default function AdminLayout({ children }: LayoutProps<"/admin">) {
   return (
     <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:flex-row">

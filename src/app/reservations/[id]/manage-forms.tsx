@@ -54,7 +54,7 @@ export function ConfirmChangeForm({
         <input key={k} type="hidden" name={k} value={v} />
       ))}
       {amountDueFils > 0 && (
-        <fieldset className="rounded-xl border-2 border-dashed border-amber-300 bg-amber-50 p-3">
+        <fieldset className="min-w-0 rounded-xl border-2 border-dashed border-amber-300 bg-amber-50 p-3">
           <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-amber-900">Test mode payment</legend>
           <p className="mb-2 text-sm">Pay the difference of {formatMoney(amountDueFils)}:</p>
           {[

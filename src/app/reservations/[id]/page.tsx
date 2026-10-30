@@ -125,7 +125,7 @@ async function ReservationDetail({ params, searchParams }: PageProps<"/reservati
         </Alert>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
           <Card>
             <CardBody className="flex flex-col gap-4 sm:flex-row">

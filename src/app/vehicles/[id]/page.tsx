@@ -80,7 +80,7 @@ async function VehicleDetails({ params, searchParams }: PageProps<"/vehicles/[id
         </Link>
       </nav>
 
-      <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
           <Card className="overflow-hidden">
             <VehicleImage vehicle={vehicle} className="aspect-[16/8]" />

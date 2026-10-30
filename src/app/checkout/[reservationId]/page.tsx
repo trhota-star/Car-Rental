@@ -44,7 +44,7 @@ async function Payment({ params }: Pick<PageProps<"/checkout/[reservationId]">, 
         }
         actions={<StatusBadge status={r.status} />}
       />
-      <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
           {holdActive ? (
             <Alert tone="info" title="Your car is on hold">

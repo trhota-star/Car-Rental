@@ -33,7 +33,7 @@ export function PaymentForm({ reservationId, totalFils, depositFils, currency }:
           <span className="rounded bg-amber-200 px-1.5 py-0.5 text-xs uppercase tracking-wide">Test mode</span>
           No real card is charged
         </p>
-        <fieldset className="mt-3 space-y-2">
+        <fieldset className="mt-3 min-w-0 space-y-2">
           <legend className="sr-only">Test card outcome</legend>
           {outcomes.map((o, i) => (
             <label key={o.value} className="flex cursor-pointer gap-3 rounded-lg bg-white p-3 ring-1 ring-amber-200 has-[input:checked]:ring-2 has-[input:checked]:ring-brand-500">

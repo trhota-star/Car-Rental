@@ -84,7 +84,7 @@ async function Checkout({ searchParams }: Pick<PageProps<"/checkout">, "searchPa
         </Link>
       </nav>
       <PageHeader eyebrow="Step 2 of 3" title="Driver details" description="We'll hold the car for 15 minutes while you pay." />
-      <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_380px]">
         <Card>
           <CardBody className="p-5 sm:p-6">
             {problem || !quote ? (
