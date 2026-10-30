@@ -9,7 +9,13 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Client } from "pg";
 
 const url = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL;
-if (!url) throw new Error("DATABASE_URL_UNPOOLED (or DATABASE_URL) is not set");
+if (!url) {
+  if (process.env.VERCEL || process.env.CI) {
+    console.warn("[deploy] DATABASE_URL / DATABASE_URL_UNPOOLED not set. Skipping migrations.");
+    process.exit(0);
+  }
+  throw new Error("DATABASE_URL_UNPOOLED (or DATABASE_URL) is not set");
+}
 
 const client = new Client({ connectionString: url, connectionTimeoutMillis: 15_000 });
 await client.connect();

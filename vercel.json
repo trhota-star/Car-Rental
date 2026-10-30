@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm db:migrate:deploy && pnpm build",
+  "crons": [
+    {
+      "path": "/api/cron/release-holds",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
