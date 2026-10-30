@@ -63,6 +63,7 @@ export function httpWebhookDeliver(url: string): WebhookDeliver {
 
 export class FakePaymentProvider implements PaymentProvider {
   readonly name = "fake";
+  readonly signatureHeader = FAKE_SIGNATURE_HEADER;
   private payments = new Map<string, Payment>();
   private holds = new Map<string, DepositHold>();
   private idempotency = new Map<string, Payment | DepositHold>();

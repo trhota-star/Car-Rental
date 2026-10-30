@@ -322,11 +322,30 @@ export async function handlePaymentWebhook(
   return applyPaymentEvent(event, { ...opts, provider });
 }
 
+/** Route-handler helper: reads the raw body and the provider's signature header. */
+export async function handlePaymentWebhookRequest(request: Request, opts: Opts = {}): Promise<WebhookResult> {
+  const provider = providerOf(opts);
+  const rawBody = await request.text();
+  const signature = request.headers.get(provider.signatureHeader ?? "x-fake-signature");
+  return handlePaymentWebhook(rawBody, signature, { ...opts, provider });
+}
+
+/** Find the reservation of a provider object when the event carries no metadata (e.g. Stripe refunds). */
+async function reservationIdFor(event: PaymentEvent): Promise<string | undefined> {
+  if (!event.data.id) return undefined;
+  if (event.type.startsWith("payment.")) {
+    const [p] = await db.select({ r: payments.reservationId }).from(payments).where(eq(payments.providerPaymentId, event.data.id));
+    return p?.r;
+  }
+  const [d] = await db.select({ r: deposits.reservationId }).from(deposits).where(eq(deposits.providerHoldId, event.data.id));
+  return d?.r;
+}
+
 /** Apply an already-verified event. Exported for tests and alternative webhook routes. */
 export async function applyPaymentEvent(event: PaymentEvent, opts: Opts = {}): Promise<WebhookResult> {
   const provider = providerOf(opts);
   const meta = event.data.metadata ?? {};
-  const reservationId = z.uuid().safeParse(meta.reservationId).success ? meta.reservationId : undefined;
+  const reservationId = z.uuid().safeParse(meta.reservationId).success ? meta.reservationId : await reservationIdFor(event);
   const base = { eventId: event.id, type: event.type, reservationId };
 
   const outcome = await db.transaction(async (tx) => {
@@ -477,6 +496,25 @@ export async function paidSummary(ex: Tx | typeof db, reservationId: string) {
   return s;
 }
 
+/**
+ * Rows created by `pnpm db:seed` use provider "seed": they never existed at a payment provider, so
+ * settlement applies refunds / deposit releases to them in the database only (local dev data).
+ */
+export const SEED_PROVIDER = "seed";
+
+function simulatedRefund(p: Payment, amount: number): ProviderPayment {
+  const refunded = p.refundedFils + amount;
+  return {
+    id: p.providerPaymentId ?? p.id,
+    amount: p.amountFils,
+    currency: p.currency,
+    status: refunded >= p.amountFils ? "refunded" : refunded > 0 ? "partially_refunded" : "succeeded",
+    refundedAmount: refunded,
+    metadata: {},
+    createdAt: p.createdAt.toISOString(),
+  };
+}
+
 export interface SettlementResult {
   reservationId: string;
   refundedFils: number;
@@ -496,9 +534,19 @@ export interface SettlementResult {
 export async function settleReservation(reservationId: string, opts: Opts = {}): Promise<SettlementResult> {
   const provider = providerOf(opts);
   const out: SettlementResult = { reservationId, refundedFils: 0, depositsReleased: 0, depositsCaptured: 0, paymentsCancelled: 0 };
-  const client = await pool.connect();
+  let client: import("pg").PoolClient | null = await pool.connect();
   try {
-    await client.query("SELECT pg_advisory_lock(hashtext($1))", [`settle:${reservationId}`]);
+    // try-lock, not lock: a provider call below may deliver a webhook synchronously (fake provider ->
+    // our own route) whose handler calls settleReservation again; waiting would deadlock. Whoever
+    // holds the lock finishes the work, and the release-holds job re-runs anything left over.
+    const { rows: lockRows } = await client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock(hashtext($1)) AS ok", [
+      `settle:${reservationId}`,
+    ]);
+    if (!lockRows[0]?.ok) {
+      client.release();
+      client = null;
+      return out;
+    }
     const [r] = await db.select().from(reservations).where(eq(reservations.id, reservationId));
     if (!r) return out;
     const pays = await db
@@ -521,7 +569,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
       if (room <= 0 || !p.providerPaymentId) continue;
       const amount = Math.min(room, owed);
       try {
-        const res = await provider.refundPayment(p.providerPaymentId, amount);
+        const res = p.provider === SEED_PROVIDER ? simulatedRefund(p, amount) : await provider.refundPayment(p.providerPaymentId, amount);
         await recordProviderPayment(p.id, res);
         owed -= amount;
         out.refundedFils += amount;
@@ -534,7 +582,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
     if (closed) {
       for (const p of pays.filter((p) => p.status === "PENDING" && p.providerPaymentId)) {
         try {
-          const res = await provider.cancelPayment(p.providerPaymentId!);
+          const res = p.provider === SEED_PROVIDER ? { ...simulatedRefund(p, 0), status: "canceled" as const } : await provider.cancelPayment(p.providerPaymentId!);
           await recordProviderPayment(p.id, res);
           await db.update(payments).set({ status: "CANCELLED" }).where(and(eq(payments.id, p.id), eq(payments.status, "PENDING")));
           out.paymentsCancelled++;
@@ -553,7 +601,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
         try {
           if (toCapture > 0) {
             const amount = Math.min(toCapture, d.amountFils);
-            const h = await provider.captureDeposit(d.providerHoldId!, amount);
+            const h = d.provider === SEED_PROVIDER ? { capturedAmount: amount } : await provider.captureDeposit(d.providerHoldId!, amount);
             await db
               .update(deposits)
               .set({ capturedFils: h.capturedAmount, status: "CAPTURED" })
@@ -561,7 +609,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
             toCapture -= amount;
             out.depositsCaptured++;
           } else {
-            await provider.releaseDeposit(d.providerHoldId!);
+            if (d.provider !== SEED_PROVIDER) await provider.releaseDeposit(d.providerHoldId!);
             await db
               .update(deposits)
               .set({ status: "RELEASED" })
@@ -596,8 +644,10 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
     }
     return out;
   } finally {
-    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [`settle:${reservationId}`]).catch(() => {});
-    client.release();
+    if (client) {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [`settle:${reservationId}`]).catch(() => {});
+      client.release();
+    }
   }
 }
 

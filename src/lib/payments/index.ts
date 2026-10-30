@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { FakePaymentProvider, httpWebhookDeliver } from "./fake-provider";
+import { StripePaymentProvider } from "./stripe-provider";
 import type { PaymentProvider } from "./types";
 
 export * from "./types";
@@ -9,6 +10,8 @@ const settings = z.object({
   FAKE_PAYMENT_WEBHOOK_SECRET: z.string().optional(),
   FAKE_PAYMENT_WEBHOOK_URL: z.url().optional(),
   FAKE_PAYMENT_DUPLICATE_WEBHOOKS: z.stringbool().default(false),
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
 });
 
 export function createPaymentProvider(env: Record<string, string | undefined> = process.env): PaymentProvider {
@@ -22,7 +25,11 @@ export function createPaymentProvider(env: Record<string, string | undefined> = 
         duplicateWebhooks: s.FAKE_PAYMENT_DUPLICATE_WEBHOOKS,
       });
     case "stripe":
-      throw new Error("PAYMENT_PROVIDER=stripe is not implemented yet");
+      // UNVERIFIED (no Stripe account yet): test-mode keys only.
+      if (!s.STRIPE_SECRET_KEY || !s.STRIPE_WEBHOOK_SECRET) {
+        throw new Error("STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set for PAYMENT_PROVIDER=stripe");
+      }
+      return new StripePaymentProvider({ secretKey: s.STRIPE_SECRET_KEY, webhookSecret: s.STRIPE_WEBHOOK_SECRET });
   }
 }
 

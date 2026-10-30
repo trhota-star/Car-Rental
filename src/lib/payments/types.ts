@@ -66,6 +66,8 @@ export interface ChargeInput {
 
 export interface PaymentProvider {
   readonly name: string;
+  /** HTTP header carrying the webhook signature (e.g. "x-fake-signature", "stripe-signature"). */
+  readonly signatureHeader?: string;
   createPayment(input: ChargeInput): Promise<Payment>;
   /** Cancel a payment that has not completed yet. */
   cancelPayment(paymentId: string): Promise<Payment>;
