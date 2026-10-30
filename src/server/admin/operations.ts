@@ -40,6 +40,7 @@ export const FUEL_CHARGE_PER_PERCENT_FILS = 500;
 // ---------------------------------------------------------------------------
 
 const pickupBranch = alias(branches, "pickup_branch");
+const returnBranch = alias(branches, "return_branch");
 
 const listInput = z.object({
   status: z.enum(reservationStatus.enumValues).optional(),
@@ -62,11 +63,13 @@ export async function listReservations(actorUserId: string, filter: z.input<type
       vehicle: { id: vehicles.id, make: vehicles.make, model: vehicles.model, plateNumber: vehicles.plateNumber },
       customer: { id: users.id, name: users.name, email: users.email },
       pickupBranch: { id: pickupBranch.id, code: pickupBranch.code, name: pickupBranch.name, timeZone: pickupBranch.timeZone },
+      returnBranch: { id: returnBranch.id, code: returnBranch.code, name: returnBranch.name, timeZone: returnBranch.timeZone },
     })
     .from(reservations)
     .innerJoin(vehicles, eq(vehicles.id, reservations.vehicleId))
     .innerJoin(users, eq(users.id, reservations.userId))
     .innerJoin(pickupBranch, eq(pickupBranch.id, reservations.pickupBranchId))
+    .innerJoin(returnBranch, eq(returnBranch.id, reservations.returnBranchId))
     .where(
       and(
         f.status ? eq(reservations.status, f.status) : undefined,
