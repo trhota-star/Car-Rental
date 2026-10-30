@@ -1,16 +1,21 @@
-import { getPaymentProvider, PaymentError } from "@/lib/payments";
+import { log } from "@/lib/auth-log";
+import { isServiceError } from "@/server/errors";
+import { handlePaymentWebhook } from "@/server/payments";
 
-// Receives payment webhooks (fake provider locally, real provider later).
-// Providers may deliver the same event more than once: booking logic must
-// process each event.id only once.
+// Receives payment provider webhooks (fake provider locally, real provider later).
+// handlePaymentWebhook verifies the signature and processes each event id once.
 export async function POST(request: Request) {
   const rawBody = await request.text();
-  const signature = request.headers.get("x-fake-signature");
+  const signature = request.headers.get("x-fake-signature") ?? request.headers.get("stripe-signature");
   try {
-    const event = getPaymentProvider().verifyWebhook(rawBody, signature);
-    return Response.json({ received: true, id: event.id, type: event.type });
+    const result = await handlePaymentWebhook(rawBody, signature);
+    return Response.json(result);
   } catch (err) {
-    if (err instanceof PaymentError) return Response.json({ error: err.message }, { status: 400 });
-    throw err;
+    if (isServiceError(err, "INVALID_SIGNATURE")) {
+      log("warn", "webhook.invalid_signature", {});
+      return Response.json({ error: "invalid signature" }, { status: 400 });
+    }
+    log("error", "webhook.failed", { error: err });
+    return Response.json({ error: "webhook processing failed" }, { status: 500 });
   }
 }

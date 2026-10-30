@@ -36,7 +36,7 @@ export function PaymentForm({ reservationId, totalFils, depositFils, currency }:
         <fieldset className="mt-3 space-y-2">
           <legend className="sr-only">Test card outcome</legend>
           {outcomes.map((o, i) => (
-            <label key={o.value} className="flex cursor-pointer gap-3 rounded-lg bg-white p-3 ring-1 ring-amber-200 has-[:checked]:ring-2 has-[:checked]:ring-brand-500">
+            <label key={o.value} className="flex cursor-pointer gap-3 rounded-lg bg-white p-3 ring-1 ring-amber-200 has-[input:checked]:ring-2 has-[input:checked]:ring-brand-500">
               <input type="radio" name="paymentMethod" value={o.value} defaultChecked={i === 0} className="mt-0.5 accent-brand-600" />
               <span>
                 <span className="block text-sm font-medium">{o.label}</span>
@@ -54,7 +54,8 @@ export function PaymentForm({ reservationId, totalFils, depositFils, currency }:
       )}
       {state.outcome && state.outcome !== "PROCESSING" && (
         <Alert tone="error" title={state.outcome === "DEPOSIT_FAILED" ? "Deposit hold failed" : "Payment not completed"}>
-          {state.message} You can choose another option and try again.
+          {state.message}
+          {state.message && !/[.!?]$/.test(state.message) ? "." : ""} You can choose another option and try again.
         </Alert>
       )}
 

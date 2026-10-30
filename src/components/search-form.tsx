@@ -107,7 +107,7 @@ export function SearchForm({
       </div>
 
       {showFilters && (
-        <fieldset className="grid gap-4 border-t border-line pt-4 sm:grid-cols-3 lg:grid-cols-6">
+        <fieldset className="grid grid-cols-2 gap-4 border-t border-line pt-4 sm:grid-cols-3 lg:grid-cols-6">
           <legend className="sr-only">Filters</legend>
           <Field id="category" label="Category" error={errors.category}>
             <Select {...fieldAria("category", errors.category)} name="category" defaultValue={values.category ?? ""}>

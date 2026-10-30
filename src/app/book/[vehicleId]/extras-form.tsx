@@ -39,7 +39,7 @@ export function ExtrasForm({
         {options.map((o) => {
           const id = `extra-${o.code}`;
           return (
-            <li key={o.code} className="flex flex-col gap-3 rounded-xl border border-line p-4 has-[:checked]:border-brand-400 has-[:checked]:bg-brand-50/50 sm:flex-row sm:items-center">
+            <li key={o.code} className="flex flex-col gap-3 rounded-xl border border-line p-4 has-[input:checked]:border-brand-400 has-[input:checked]:bg-brand-50/50 sm:flex-row sm:items-center">
               <input
                 id={id}
                 type="checkbox"
