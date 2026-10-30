@@ -6,7 +6,8 @@ Car rental app. Next.js (App Router) + TypeScript + Tailwind + Drizzle/PostgreSQ
 
 1. `pnpm install`
 2. `pnpm db:setup` — creates the `driveeasy` user and the `driveeasy_dev` / `driveeasy_test`
-   databases (with `btree_gist`) on local PostgreSQL 18 (port 5433). Asks for the `postgres` password.
+   databases (with `btree_gist`) on local PostgreSQL 18 (DriveEasy server, port 5434). Uses the admin password saved in `%APPDATA%\postgresql\pgpass.conf`
+   (Windows service `postgresql-driveeasy`, data in `C:\ProgramData\DriveEasy\pg18`).
 3. `pnpm db:check` — confirms both databases are reachable.
 4. `pnpm dev` — http://localhost:3000
 
