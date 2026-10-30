@@ -1,8 +1,31 @@
-import type { Quote } from "@/server/pricing-core";
 import { formatMoney, labelFor } from "./format";
 
+/** The fields of a server quote (or a reservation's price snapshot) that we display. */
+export interface PriceSummary {
+  currency: string;
+  rentalDays: number;
+  dailyRateFils: number;
+  baseFils: number;
+  extras: Array<{ extraId: string; name: string; pricing: string; quantity: number; unitPriceFils: number; totalFils: number }>;
+  extrasFils: number;
+  oneWayFeeFils: number;
+  subtotalFils: number;
+  vatRateBp: number;
+  vatFils: number;
+  totalFils: number;
+  depositFils: number;
+}
+
 /** Server-computed quote rendered line by line. No arithmetic happens here. */
-export function PriceBreakdown({ quote, title = "Price breakdown" }: { quote: Quote; title?: string }) {
+export function PriceBreakdown({
+  quote,
+  title = "Price breakdown",
+  totalLabel = "Total to pay now",
+}: {
+  quote: PriceSummary;
+  title?: string;
+  totalLabel?: string;
+}) {
   const c = quote.currency;
   const vatPercent = (quote.vatRateBp / 100).toLocaleString("en-AE", { maximumFractionDigits: 2 });
   return (
@@ -36,7 +59,7 @@ export function PriceBreakdown({ quote, title = "Price breakdown" }: { quote: Qu
         </div>
         <Row label={`VAT (${vatPercent}%)`} value={formatMoney(quote.vatFils, c)} testId="price-vat" />
         <div className="flex items-baseline justify-between gap-4 border-t border-line pt-3">
-          <dt className="text-base font-semibold">Total to pay now</dt>
+          <dt className="text-base font-semibold">{totalLabel}</dt>
           <dd className="text-xl font-bold text-ink" data-testid="price-total">
             {formatMoney(quote.totalFils, c)}
           </dd>
