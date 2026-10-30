@@ -256,7 +256,11 @@ async function recordProviderPayment(paymentId: string, res: ProviderPayment): P
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(payments).where(eq(payments.id, paymentId)).for("update");
     const next = mapPaymentStatus(res);
-    const applyStatus = (next === "FAILED" || next === "CANCELLED") && row.status === "PENDING";
+    // Failures may come from the sync response; refunds too (their amount is what we asked for).
+    // Success is never taken from the sync response: that is the webhook's job.
+    const applyStatus =
+      ((next === "FAILED" || next === "CANCELLED") && row.status === "PENDING") ||
+      ((next === "PARTIALLY_REFUNDED" || next === "REFUNDED") && PAYMENT_RANK[next] >= PAYMENT_RANK[row.status] && row.status !== "PENDING");
     const [updated] = await tx
       .update(payments)
       .set({
@@ -414,7 +418,8 @@ async function tryConfirm(tx: Tx, r: Reservation): Promise<void> {
   if (r.status === "CANCELLED") {
     // Fully refunded cancellation -> REFUNDED.
     const paid = await paidSummary(tx, r.id);
-    if (r.refundedFils > 0 && paid.refundedFils >= r.refundedFils) {
+    const target = refundTarget(r, paid.paidFils);
+    if (target > 0 && paid.refundedFils >= target) {
       await tx.update(reservations).set({ status: "REFUNDED" }).where(eq(reservations.id, r.id));
       await writeAudit(tx, { actorUserId: null, action: "reservation.refunded", entityType: "reservation", entityId: r.id });
     }
@@ -447,6 +452,19 @@ async function tryConfirm(tx: Tx, r: Reservation): Promise<void> {
 // ---------------------------------------------------------------------------
 // Settlement (refunds, deposit release / capture)
 // ---------------------------------------------------------------------------
+
+/**
+ * Refund owed in total for a reservation, recomputed from what was actually paid:
+ * - EXPIRED: everything paid.
+ * - CANCELLED / REFUNDED: everything paid minus the cancellation fee (so a payment that lands after
+ *   the cancel is refunded too).
+ * - otherwise: reservations.refunded_fils (refunds decided by date changes), capped at paid.
+ */
+export function refundTarget(r: Pick<Reservation, "status" | "refundedFils" | "cancellationFeeFils">, paidFils: number): number {
+  if (r.status === "EXPIRED") return paidFils;
+  if (r.status === "CANCELLED" || r.status === "REFUNDED") return Math.max(0, paidFils - r.cancellationFeeFils);
+  return Math.min(r.refundedFils, paidFils);
+}
 
 export async function paidSummary(ex: Tx | typeof db, reservationId: string) {
   const [s] = await ex
@@ -495,7 +513,7 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
     const paid = pays.filter((p) => ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"].includes(p.status));
     const paidFils = paid.reduce((s, p) => s + p.amountFils, 0);
     const refundedSoFar = pays.reduce((s, p) => s + p.refundedFils, 0);
-    const target = r.status === "EXPIRED" ? paidFils : Math.min(r.refundedFils, paidFils);
+    const target = refundTarget(r, paidFils);
     let owed = target - refundedSoFar;
     for (const p of paid) {
       if (owed <= 0) break;
@@ -521,7 +539,8 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
           await db.update(payments).set({ status: "CANCELLED" }).where(and(eq(payments.id, p.id), eq(payments.status, "PENDING")));
           out.paymentsCancelled++;
         } catch (err) {
-          log.error("payment.cancel_failed", { reservationId, paymentId: p.id, err });
+          // Usually a race: the payment already succeeded at the provider; its webhook will trigger a refund.
+          log.warn("payment.cancel_failed", { reservationId, paymentId: p.id, err });
         }
       }
     }
@@ -558,9 +577,10 @@ export async function settleReservation(reservationId: string, opts: Opts = {}):
       }
     }
 
-    if (r.status === "CANCELLED" && r.refundedFils > 0) {
+    if (r.status === "CANCELLED") {
       const s = await paidSummary(db, r.id);
-      if (s.refundedFils >= r.refundedFils) {
+      const t = refundTarget(r, s.paidFils);
+      if (t > 0 && s.refundedFils >= t) {
         const updated = await db
           .update(reservations)
           .set({ status: "REFUNDED" })
@@ -594,7 +614,11 @@ export async function findUnsettledReservations(limit = 100): Promise<string[]> 
           AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id} AND p.status = 'PENDING' AND p.provider_payment_id IS NOT NULL))
         OR (${reservations.status} = 'EXPIRED' AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id}
               AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils))
-        OR (${reservations.status} <> 'EXPIRED' AND ${reservations.refundedFils} >
+        OR (${reservations.status} IN ('CANCELLED','REFUNDED')
+            AND (SELECT coalesce(sum(p.amount_fils) FILTER (WHERE p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED','REFUNDED')), 0)
+                      - coalesce(sum(p.refunded_fils), 0) FROM ${payments} p WHERE p.reservation_id = ${reservations.id})
+                > ${reservations.cancellationFeeFils})
+        OR (${reservations.status} IN ('PENDING','CONFIRMED','PICKED_UP','RETURNED') AND ${reservations.refundedFils} >
               (SELECT coalesce(sum(p.refunded_fils), 0) FROM ${payments} p WHERE p.reservation_id = ${reservations.id})
             AND EXISTS (SELECT 1 FROM ${payments} p WHERE p.reservation_id = ${reservations.id}
               AND p.status IN ('SUCCEEDED','PARTIALLY_REFUNDED') AND p.refunded_fils < p.amount_fils))
