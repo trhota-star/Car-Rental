@@ -449,7 +449,6 @@ export const reservations = pgTable(
       "reservations_totals_consistent",
       sql`${t.subtotalFils} = ${t.baseFils} + ${t.extrasFils} + ${t.oneWayFeeFils} AND ${t.totalFils} = ${t.subtotalFils} + ${t.vatFils}`,
     ),
-    check("reservations_refund_le_total", sql`${t.refundedFils} <= ${t.totalFils}`),
     check("reservations_currency_format", sql`${t.currency} ~ '^[A-Z]{3}$'`),
     // EXCLUDE (vehicle_id WITH =, period WITH &&) WHERE active -> custom migration 0001.
   ],

@@ -1,11 +1,11 @@
 // Scheduled jobs. The same job functions run from:
 //   SCHEDULER_DRIVER=local -> `pnpm jobs:release-holds` / `pnpm jobs:watch` on this machine
-//   SCHEDULER_DRIVER=cron  -> a cloud scheduler calling GET /api/cron/<job>
-import { pool } from "@/lib/db";
-import { PgHoldStore, releaseExpiredHolds } from "./release-expired-holds";
+//   SCHEDULER_DRIVER=cron  -> a cloud scheduler calling GET /api/cron/<job> (Bearer CRON_SECRET)
+import { releaseExpiredHolds } from "@/server/holds";
 
 export const jobs = {
-  "release-holds": () => releaseExpiredHolds(new PgHoldStore(pool)),
+  /** Expire unpaid holds + settle refunds / deposit releases. Returns { released, settled, ranAt }. */
+  "release-holds": () => releaseExpiredHolds(),
 } as const;
 
 export type JobName = keyof typeof jobs;

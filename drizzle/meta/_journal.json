@@ -15,6 +15,13 @@
       "when": 1793377115434,
       "tag": "0001_constraints",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793377836880,
+      "tag": "0002_drop_refund_total_check",
+      "breakpoints": true
     }
   ]
 }
