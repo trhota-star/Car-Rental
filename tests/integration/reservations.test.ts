@@ -1,9 +1,10 @@
 // QA-4 (service level) + reservation transaction rules: races, idempotency, back-to-back, maintenance,
 // expired holds, server-side pricing snapshot, validation.
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
-import { reservations } from "@/lib/db/schema";
+import { driverProfiles, reservations } from "@/lib/db/schema";
 import { createReservation } from "@/server/reservations";
 import { truncateAll } from "../helpers/db";
 import { DAY, HOUR, createMaintenanceBlock, createUser, createVehicle, createWorld, futureAt } from "../helpers/factories";
@@ -132,7 +133,12 @@ describe("createReservation", () => {
     ["longer than 90 days", (s: Date) => ({ pickupAt: s, returnAt: new Date(+s + 91 * DAY) }), "VALIDATION_ERROR"],
     ["driver under 21", () => ({ driver: driver({ dateOfBirth: "2010-01-01" }) }), "VALIDATION_ERROR"],
     ["licence expires before return", () => ({ driver: driver({ licenceExpiry: "2026-01-01" }) }), "VALIDATION_ERROR"],
-    ["licence file of another user", () => ({ driver: driver({ licenceFileKey: "licences/someone-else/x.jpg" }) }), "FORBIDDEN"],
+    ["malformed licence key", () => ({ driver: driver({ licenceFileKey: "licences/someone-else/x.jpg" }) }), "VALIDATION_ERROR"],
+    [
+      "licence file in another user's folder",
+      () => ({ driver: driver({ licenceFileKey: `licences/${randomUUID()}/${randomUUID()}.jpg` }) }),
+      "FORBIDDEN",
+    ],
   ])("rejects: %s", async (_name, patch, code) => {
     const w = await createWorld();
     const s = futureAt(6);
@@ -147,6 +153,10 @@ describe("createReservation", () => {
     const key = `licences/${w.customer.id}/../${(await createUser()).id}/licence.jpg`;
     const r = await settle(createReservation({ ...bookingInput(w, s, new Date(+s + DAY)), driver: driver({ licenceFileKey: key }) }));
     expect(r.ok, "a ../ licence key must not be accepted").toBe(false);
+    expect(!r.ok && ["VALIDATION_ERROR", "FORBIDDEN"]).toContain(!r.ok && r.code);
+    expect(await countRes(w.vehicle.id)).toBe(0);
+    const profiles = await db.select().from(driverProfiles).where(eq(driverProfiles.userId, w.customer.id));
+    expect(profiles).toHaveLength(0);
   });
 
   it("rejects a vehicle from a different branch, retired vehicles, and closed hours", async () => {

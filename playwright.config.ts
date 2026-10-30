@@ -8,12 +8,15 @@ import { testDatabaseUrl } from "./tests/helpers/env";
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 const baseURL = process.env.E2E_BASE_URL ?? `http://localhost:${PORT}`;
 const testDb = testDatabaseUrl();
+// The DB is reset + seeded first (prepare-db), then the app is built/started against it.
+const prepareDb = "pnpm exec tsx tests/e2e/prepare-db.ts";
 const serverCommand =
-  process.env.E2E_SERVER === "dev" ? `pnpm exec next dev -p ${PORT}` : `pnpm build && pnpm exec next start -p ${PORT}`;
+  process.env.E2E_SERVER === "dev"
+    ? `${prepareDb} && pnpm exec next dev -p ${PORT}`
+    : `${prepareDb} && pnpm build && pnpm exec next start -p ${PORT}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  globalSetup: "./tests/e2e/global-setup.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
