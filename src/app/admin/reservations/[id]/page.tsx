@@ -6,7 +6,6 @@ import { formatDateTime, formatMoney } from "@/components/format";
 import { PriceBreakdown } from "@/components/price-breakdown";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, Card, CardBody, CardHeader, CardTitle, DescriptionList, Field, Input, PageHeader, PageSkeleton, Select, Textarea } from "@/components/ui";
-import { utcToZoned } from "@/components/zoned-time";
 import { requireAdmin } from "@/lib/auth-session";
 import { listAllBranches } from "@/server/admin/catalog";
 import { getReservationByIdForAdmin, listDamageReports } from "@/server/admin/operations";
@@ -41,7 +40,6 @@ async function Detail({ params, searchParams }: PageProps<"/admin/reservations/[
   const ptz = d.pickupBranch.timeZone;
   const rtz = d.returnBranch.timeZone;
   const a = d.agreement;
-  const nowLocal = utcToZoned(new Date(), rtz);
 
   return (
     <div className="space-y-6">
@@ -177,11 +175,11 @@ async function Detail({ params, searchParams }: PageProps<"/admin/reservations/[
                     <Field id="inFuel" label="Fuel / charge level (%)">
                       <Input id="inFuel" name="fuelPercent" type="number" min={0} max={100} required />
                     </Field>
-                    <Field id="returnedDate" label={`Returned on (${rtz})`}>
-                      <Input id="returnedDate" name="returnedDate" type="date" defaultValue={nowLocal.date} />
+                    <Field id="returnedDate" label={`Returned on (${rtz}, empty = now)`}>
+                      <Input id="returnedDate" name="returnedDate" type="date" />
                     </Field>
                     <Field id="returnedTime" label="Returned at">
-                      <Input id="returnedTime" name="returnedTime" type="time" defaultValue={nowLocal.time} />
+                      <Input id="returnedTime" name="returnedTime" type="time" />
                     </Field>
                     <Field id="returnBranchId" label="Returned to branch">
                       <Select id="returnBranchId" name="returnBranchId" defaultValue={r.returnBranchId}>
